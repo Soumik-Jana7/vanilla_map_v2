@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Google Maps with Search and Markers</title>
+    <style>
+      html, body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      /* Map fills the entire viewport */
+      #map {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+      }
+      /* Floating, translucent search panel */
+      .search-panel {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        z-index: 999;
+        background-color: rgba(255, 255, 255);
+        padding: 10px;
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .control-row {
+        display: flex;
+        justify-content: flex-start;
+        align-items: center;
+        gap: 15px;
+      }
+      .control-row label {
+        cursor: pointer;
+      }
+      /* Common input styles */
+      #pac-input, #lat-input, #long-input {
+        padding: 8px 14px;
+        font-size: 16px;
+        background-color: #fef2fd;
+        color: #333;
+        border: 2px solid #8000FF;
+        border-radius: 25px;
+        width: 240px;
+        max-width: 300px;
+        box-shadow: 0px 4px 6px rgba(179, 0, 255, 0.3);
+        outline: none;
+        transition: all 0.3s ease;
+      }
+      #pac-input:focus, #lat-input:focus, #long-input:focus {
+        border-color: #FF007A;
+        box-shadow: 0px 6px 8px rgba(174, 0, 255, 0.5);
+        background-color: #fff;
+      }
+      /* Initially show text search and hide lat/long */
+      #pac-input {
+        display: block;
+      }
+      #lat-input, #long-input {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Floating search panel -->
+    <div class="search-panel">
+      <div class="control-row">
+        <label>
+          <input type="radio" id="search-radio-text" name="search-mode" value="text" checked>
+          Text Search
+        </label>
+        <label>
+          <input type="radio" id="search-radio-latlong" name="search-mode" value="latlong">
+          Lat/Long Search
+        </label>
+      </div>
+      <div class="control-row">
+        <input id="pac-input" type="text" placeholder="Search Box">
+        <input id="lat-input" type="number" placeholder="Latitude" step="any">
+        <input id="long-input" type="number" placeholder="Longitude" step="any">
+      </div>
+    </div>
+    
+    <!-- Map container -->
+    <div id="map"></div>
+
+    <script>
+      let map, marker, geocoder;
+      let searchBox;
+      
+      // Helper: retrieve query parameters from the URL
+      function getQueryParam(param) {
+        const urlParams = new URLSearchParams(window.location.search);
+        return urlParams.get(param);
+      }
+
+      // Helper: extract additional address details from address_components array
+      function extractAddressDetails(components) {
+        let addressLine1 = '', addressLine2 = '', city = '', zipcode = '', country = '';
+        components.forEach(component => {
+          // Sometimes street_number and route are combined for a full street address.
+          if (component.types.includes("street_number")) {
+            addressLine1 = component.long_name;
+          }
+          if (component.types.includes("route")) {
+            addressLine2 = component.long_name;
+          }
+          if (component.types.includes("locality")) {
+            city = component.long_name;
+          }
+          if (component.types.includes("postal_code")) {
+            zipcode = component.long_name;
+          }
+          if (component.types.includes("country")) {
+            country = component.long_name;
+          }
+        });
+        return { addressLine1, addressLine2, city, zipcode, country };
+      }
+
+      // Helper: post location data to parent window
+      function postLocationData(locationData) {
+        console.log('Posting location data:', locationData);
+        Object.keys(window.parent).forEach(key => {
+          if (window.parent[key]?.postMessage) {
+            window.parent[key].postMessage(locationData, '*');
+          }
+        });
+      }
+
+      // Place a marker at position and reverse geocode to send full details
+      function placeMarkerAndSendData(position) {
+        if (marker) marker.setMap(null);
+        marker = new google.maps.Marker({
+          map,
+          position,
+        });
+        geocoder.geocode({ location: position }, (results, status) => {
+          if (status === 'OK' && results[0]) {
+            const result = results[0];
+            const extraDetails = extractAddressDetails(result.address_components);
+            const locationData = {
+              name: result.name || '',
+              address: result.formatted_address,
+              lat: position.lat,
+              lng: position.lng,
+              place_id: result.place_id,
+              types: result.types,
+              ...extraDetails
+            };
+            postLocationData(locationData);
+          } else {
+            console.error('Reverse geocode failed:', status);
+          }
+        });
+      }
+
+      // Update marker based on Lat/Long input fields if valid
+      function updateMarkerFromLatLongInputs() {
+        const latVal = parseFloat(document.getElementById('lat-input').value);
+        const lngVal = parseFloat(document.getElementById('long-input').value);
+        if (!isNaN(latVal) && !isNaN(lngVal)) {
+          const pos = { lat: latVal, lng: lngVal };
+          map.setCenter(pos);
+          placeMarkerAndSendData(pos);
+        }
+      }
+
+      // Toggle search mode: text search or lat/long search
+      function toggleSearchMode(mode) {
+        if (mode === 'text') {
+          document.getElementById('pac-input').style.display = 'block';
+          document.getElementById('lat-input').style.display = 'none';
+          document.getElementById('long-input').style.display = 'none';
+        } else {
+          document.getElementById('pac-input').style.display = 'none';
+          document.getElementById('lat-input').style.display = 'block';
+          document.getElementById('long-input').style.display = 'block';
+        }
+      }
+
+      function initMap() {
+        // Retrieve URL parameters
+        const apiKey = getQueryParam('apiKey');
+        const searchLocation = getQueryParam('searchLocation');
+        const urlLat = parseFloat(getQueryParam('lat'));
+        const urlLng = parseFloat(getQueryParam('long'));
+
+        // Default center: New York
+        let center = { lat: 40.7128, lng: -74.0060 };
+
+        // Create map instance
+        map = new google.maps.Map(document.getElementById('map'), {
+          zoom: 8,
+          center,
+        });
+
+        geocoder = new google.maps.Geocoder();
+
+        // If lat/long provided in URL, use them
+        if (!isNaN(urlLat) && !isNaN(urlLng)) {
+          center = { lat: urlLat, lng: urlLng };
+          map.setCenter(center);
+          placeMarkerAndSendData(center);
+          // Update lat/long inputs
+          document.getElementById('lat-input').value = urlLat;
+          document.getElementById('long-input').value = urlLng;
+          // Set radio to lat/long
+          document.getElementById('search-radio-latlong').checked = true;
+          toggleSearchMode('latlong');
+        }
+        // Else if searchLocation provided, geocode it
+        else if (searchLocation) {
+          geocoder.geocode({ address: searchLocation }, (results, status) => {
+            if (status === 'OK' && results[0]) {
+              const location = results[0].geometry.location;
+              center = { lat: location.lat(), lng: location.lng() };
+              map.setCenter(location);
+              placeMarkerAndSendData(center);
+              document.getElementById('pac-input').value = searchLocation;
+              // Ensure text search mode is active
+              document.getElementById('search-radio-text').checked = true;
+              toggleSearchMode('text');
+            } else {
+              console.error('Geocode failed:', status);
+            }
+          });
+        }
+
+        // Set up the search box for text input
+        const input = document.getElementById('pac-input');
+        searchBox = new google.maps.places.SearchBox(input);
+        map.addListener('bounds_changed', () => {
+          searchBox.setBounds(map.getBounds());
+        });
+
+        let markers = [];
+        searchBox.addListener('places_changed', () => {
+          const places = searchBox.getPlaces();
+          if (!places || places.length === 0) return;
+
+          // Clear old markers
+          markers.forEach(m => m.setMap(null));
+          markers = [];
+          const bounds = new google.maps.LatLngBounds();
+          places.forEach(place => {
+            if (!place.geometry || !place.geometry.location) return;
+            const newMarker = new google.maps.Marker({
+              map,
+              position: place.geometry.location,
+            });
+            markers.push(newMarker);
+            // If address_components exist, extract extra details
+            let extraDetails = {};
+            if (place.address_components) {
+              extraDetails = extractAddressDetails(place.address_components);
+            }
+            const locationData = {
+              name: place.name,
+              address: place.formatted_address,
+              lat: place.geometry.location.lat(),
+              lng: place.geometry.location.lng(),
+              place_id: place.place_id,
+              types: place.types,
+              ...extraDetails
+            };
+            postLocationData(locationData);
+            if (place.geometry.viewport) {
+              bounds.union(place.geometry.viewport);
+            } else {
+              bounds.extend(place.geometry.location);
+            }
+          });
+          map.fitBounds(bounds);
+        });
+
+        // Listen for map clicks
+        map.addListener('click', e => {
+          const pos = {
+            lat: e.latLng.lat(),
+            lng: e.latLng.lng(),
+          };
+          placeMarkerAndSendData(pos);
+          // If lat/long mode is active, update the input fields
+          if (document.getElementById('search-radio-latlong').checked) {
+            document.getElementById('lat-input').value = pos.lat;
+            document.getElementById('long-input').value = pos.lng;
+          }
+        });
+
+        // Radio button event listeners to toggle modes
+        document.getElementById('search-radio-text').addEventListener('change', () => {
+          toggleSearchMode('text');
+        });
+        document.getElementById('search-radio-latlong').addEventListener('change', () => {
+          toggleSearchMode('latlong');
+          updateMarkerFromLatLongInputs();
+        });
+        // Listen for changes on lat/long inputs (update on change)
+        document.getElementById('lat-input').addEventListener('change', updateMarkerFromLatLongInputs);
+        document.getElementById('long-input').addEventListener('change', updateMarkerFromLatLongInputs);
+      }
+
+      // Dynamically load the Google Maps API using the provided apiKey
+      const apiKey = getQueryParam('apiKey');
+      if (apiKey) {
+        const script = document.createElement('script');
+        script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&callback=initMap`;
+        script.async = true;
+        script.defer = true;
+        document.head.appendChild(script);
+      } else {
+        console.error('API Key is missing!');
+      }
+    </script>
+  </body>
+</html>
